@@ -1660,7 +1660,7 @@ app.delete("/api/resources/:resourceId/:courseId", async (req, res) => {
   }
 });
 
-app.get("/api/admin/faculty", async (req, res) => {
+app.get("/api/admin/faculties", async (req, res) => {
   const adminId = req.headers["x-admin-id"];
 
   console.log("[ADMIN FACULTY] AdminID:", adminId);
@@ -1685,7 +1685,7 @@ app.get("/api/admin/faculty", async (req, res) => {
 
 
 app.post(
-  "/api/admin/faculty",
+  "/api/admin/faculties",
   upload.single("photo"),
   async (req, res) => {
     console.log("[CREATE FACULTY] Body:", req.body);
@@ -1769,7 +1769,7 @@ app.post(
 );
 
 app.delete(
-  "/api/admin/faculty/:facultyId/:department",
+  "/api/admin/faculties/:facultyId/:department",
   async (req, res) => {
     const { facultyId, department } = req.params;
 
