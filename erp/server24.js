@@ -436,7 +436,7 @@ app.put('/api/faculty/:facultyId', async (req, res) => {
 
 // GET admin by ID - CORRECT VERSION for your table structure
 // GET admin by ID - CORRECT VERSION (No sort key)
-app.get("/api/admin/:adminId", async (req, res) => {
+app.get("/api/admin/profile/:adminId", async (req, res) => {
   try {
     const { adminId } = req.params;
 
