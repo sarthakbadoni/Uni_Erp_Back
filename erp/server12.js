@@ -634,6 +634,170 @@ app.get("/api/circulars/:courseId", async (req, res) => {
 
 
 
+app.get("/api/exams/upcoming", async (req, res) => {
+  try {
+    const { courseId, semester } = req.query;
+    if (!courseId || !semester) {
+      return res.status(400).json({ error: "courseId and semester required" });
+    }
+
+    const params = {
+      TableName: "ExamSchedule",
+      KeyConditionExpression:
+        "CourseID = :cid AND begins_with(#sk, :sem)",
+      ExpressionAttributeNames: {
+        "#sk": "Semester#ExamDateTime"
+      },
+      ExpressionAttributeValues: {
+        ":cid": courseId,
+        ":sem": `${semester}#`
+      }
+    };
+
+    const data = await dynamo.query(params).promise();
+    res.json(data.Items || []);
+  } catch (err) {
+    console.error("[UPCOMING-EXAMS]", err);
+    res.status(500).json({ error: "Failed to fetch exams" });
+  }
+});
+
+
+
+
+app.get("/api/exams/admit-card/:studentId", async (req, res) => {
+  try {
+    const studentId = req.params.studentId;
+
+    const params = {
+      TableName: "AdmitCards",
+      KeyConditionExpression: "StudentID = :sid",
+      ExpressionAttributeValues: {
+        ":sid": studentId
+      }
+    };
+
+    const data = await dynamo.query(params).promise();
+    res.json(data.Items || []);
+  } catch (err) {
+    console.error("[ADMIT-CARDS]", err);
+    res.status(500).json({ error: "Failed to fetch admit cards" });
+  }
+});
+
+
+
+app.post("/api/exams/admit-card/downloaded", async (req, res) => {
+  try {
+    const { studentId, semester } = req.body;
+
+    const params = {
+      TableName: "AdmitCards",
+      Key: {
+        StudentID: studentId,
+        Semester: Number(semester)
+      },
+      UpdateExpression: "SET Downloaded = :d",
+      ExpressionAttributeValues: {
+        ":d": true
+      }
+    };
+
+    await dynamo.update(params).promise();
+    res.json({ success: true });
+  } catch (err) {
+    console.error("[ADMIT-DOWNLOADED]", err);
+    res.status(500).json({ error: "Update failed" });
+  }
+});
+
+
+app.get("/api/exams/results/:studentId", async (req, res) => {
+  try {
+    const { studentId } = req.params;
+    const { semester } = req.query;
+
+    console.log("========== [RESULTS API HIT] ==========");
+    console.log("StudentID:", studentId);
+    console.log("Semester (raw):", semester);
+
+    if (!semester) {
+      console.error("[RESULTS] Semester missing in query");
+      return res.status(400).json({ error: "semester required" });
+    }
+
+    const semesterPrefix = `${semester}#`;
+    console.log("Query Prefix:", semesterPrefix);
+
+    // ---- QUERY RESULTS TABLE ----
+    const resultParams = {
+      TableName: "Results",
+      KeyConditionExpression:
+        "StudentID = :sid AND begins_with(#sk, :sem)",
+      ExpressionAttributeNames: {
+        "#sk": "Semester#SubjectCode"
+      },
+      ExpressionAttributeValues: {
+        ":sid": studentId,
+        ":sem": semesterPrefix
+      }
+    };
+
+    console.log(
+      "[RESULTS] Query Params:",
+      JSON.stringify(resultParams, null, 2)
+    );
+
+    const subjectsRes = await dynamo.query(resultParams).promise();
+
+    console.log(
+      "[RESULTS] Subjects Found:",
+      subjectsRes.Items?.length || 0
+    );
+
+    // ---- QUERY SUMMARY TABLE ----
+    const summaryParams = {
+      TableName: "SemesterSummary",
+      Key: {
+        StudentID: studentId,
+        Semester: Number(semester)
+      }
+    };
+
+    console.log(
+      "[RESULTS] Summary Get Params:",
+      JSON.stringify(summaryParams, null, 2)
+    );
+
+    const summaryRes = await dynamo.get(summaryParams).promise();
+
+    console.log(
+      "[RESULTS] Summary Found:",
+      summaryRes.Item ? "YES" : "NO"
+    );
+
+    // ---- RESPONSE ----
+    res.json({
+      subjects: subjectsRes.Items || [],
+      summary: summaryRes.Item || null
+    });
+
+    console.log("========== [RESULTS API DONE] ==========");
+  } catch (err) {
+    console.error("❌ [RESULTS API ERROR]", err);
+    res.status(500).json({
+      error: "Failed to fetch results",
+      details: err.message
+    });
+  }
+});
+
+
+  
+
+
+
+
 
 
 

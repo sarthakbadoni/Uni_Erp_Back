@@ -11,6 +11,34 @@ const dynamo = new AWS.DynamoDB.DocumentClient();
 app.use(cors());
 app.use(express.json());
 
+async function scanTable(TableName, FilterExpression, ExpressionAttributeValues, ExpressionAttributeNames) {
+  const params = {
+    TableName,
+  };
+
+  if (FilterExpression) {
+    params.FilterExpression = FilterExpression;
+    params.ExpressionAttributeValues = ExpressionAttributeValues;
+    params.ExpressionAttributeNames = ExpressionAttributeNames;
+  }
+
+  let items = [];
+  let lastKey;
+
+  do {
+    const data = await dynamo.scan({
+      ...params,
+      ExclusiveStartKey: lastKey,
+    }).promise();
+
+    items = items.concat(data.Items || []);
+    lastKey = data.LastEvaluatedKey;
+  } while (lastKey);
+
+  return items;
+}
+
+
 // === LOGIN API ===
 app.post("/api/auth/login", async (req, res) => {
   const { userId } = req.body;
@@ -630,6 +658,739 @@ app.get("/api/circulars/:courseId", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch circulars", details: err.message });
   }
 });
+
+
+
+
+app.get("/api/exams/upcoming", async (req, res) => {
+  try {
+    const { courseId, semester } = req.query;
+    if (!courseId || !semester) {
+      return res.status(400).json({ error: "courseId and semester required" });
+    }
+
+    const params = {
+      TableName: "ExamSchedule",
+      KeyConditionExpression:
+        "CourseID = :cid AND begins_with(#sk, :sem)",
+      ExpressionAttributeNames: {
+        "#sk": "Semester#ExamDateTime"
+      },
+      ExpressionAttributeValues: {
+        ":cid": courseId,
+        ":sem": `${semester}#`
+      }
+    };
+
+    const data = await dynamo.query(params).promise();
+    res.json(data.Items || []);
+  } catch (err) {
+    console.error("[UPCOMING-EXAMS]", err);
+    res.status(500).json({ error: "Failed to fetch exams" });
+  }
+});
+
+
+
+
+app.get("/api/exams/admit-card/:studentId", async (req, res) => {
+  try {
+    const studentId = req.params.studentId;
+
+    const params = {
+      TableName: "AdmitCards",
+      KeyConditionExpression: "StudentID = :sid",
+      ExpressionAttributeValues: {
+        ":sid": studentId
+      }
+    };
+
+    const data = await dynamo.query(params).promise();
+    res.json(data.Items || []);
+  } catch (err) {
+    console.error("[ADMIT-CARDS]", err);
+    res.status(500).json({ error: "Failed to fetch admit cards" });
+  }
+});
+
+
+
+app.post("/api/exams/admit-card/downloaded", async (req, res) => {
+  try {
+    const { studentId, semester } = req.body;
+
+    const params = {
+      TableName: "AdmitCards",
+      Key: {
+        StudentID: studentId,
+        Semester: Number(semester)
+      },
+      UpdateExpression: "SET Downloaded = :d",
+      ExpressionAttributeValues: {
+        ":d": true
+      }
+    };
+
+    await dynamo.update(params).promise();
+    res.json({ success: true });
+  } catch (err) {
+    console.error("[ADMIT-DOWNLOADED]", err);
+    res.status(500).json({ error: "Update failed" });
+  }
+});
+
+
+app.get("/api/exams/results/:studentId", async (req, res) => {
+  try {
+    const { studentId } = req.params;
+    const { semester } = req.query;
+
+    console.log("========== [RESULTS API HIT] ==========");
+    console.log("StudentID:", studentId);
+    console.log("Semester (raw):", semester);
+
+    if (!semester) {
+      console.error("[RESULTS] Semester missing in query");
+      return res.status(400).json({ error: "semester required" });
+    }
+
+    const semesterPrefix = `${semester}#`;
+    console.log("Query Prefix:", semesterPrefix);
+
+    // ---- QUERY RESULTS TABLE ----
+    const resultParams = {
+      TableName: "Results",
+      KeyConditionExpression:
+        "StudentID = :sid AND begins_with(#sk, :sem)",
+      ExpressionAttributeNames: {
+        "#sk": "Semester#SubjectCode"
+      },
+      ExpressionAttributeValues: {
+        ":sid": studentId,
+        ":sem": semesterPrefix
+      }
+    };
+
+    console.log(
+      "[RESULTS] Query Params:",
+      JSON.stringify(resultParams, null, 2)
+    );
+
+    const subjectsRes = await dynamo.query(resultParams).promise();
+
+    console.log(
+      "[RESULTS] Subjects Found:",
+      subjectsRes.Items?.length || 0
+    );
+
+    // ---- QUERY SUMMARY TABLE ----
+    const summaryParams = {
+      TableName: "SemesterSummary",
+      Key: {
+        StudentID: studentId,
+        Semester: Number(semester)
+      }
+    };
+
+    console.log(
+      "[RESULTS] Summary Get Params:",
+      JSON.stringify(summaryParams, null, 2)
+    );
+
+    const summaryRes = await dynamo.get(summaryParams).promise();
+
+    console.log(
+      "[RESULTS] Summary Found:",
+      summaryRes.Item ? "YES" : "NO"
+    );
+
+    // ---- RESPONSE ----
+    res.json({
+      subjects: subjectsRes.Items || [],
+      summary: summaryRes.Item || null
+    });
+
+    console.log("========== [RESULTS API DONE] ==========");
+  } catch (err) {
+    console.error("❌ [RESULTS API ERROR]", err);
+    res.status(500).json({
+      error: "Failed to fetch results",
+      details: err.message
+    });
+  }
+});
+
+
+
+
+
+app.get("/api/placement/stats/:courseId", async (req, res) => {
+  try {
+    console.log("[PLACEMENT-STATS] CourseID:", req.params.courseId);
+
+    const data = await dynamo.get({
+      TableName: "PlacementStats",
+      Key: { CourseID: req.params.courseId }
+    }).promise();
+
+    console.log("[PLACEMENT-STATS] Result:", data.Item);
+    res.json(data.Item || {});
+  } catch (err) {
+    console.error("[PLACEMENT-STATS ERROR]", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+app.get("/api/placement/drives", async (req, res) => {
+  try {
+    const { courseId } = req.query;
+    console.log("[PLACEMENT-DRIVES] courseId:", courseId);
+
+    const params = {
+      TableName: "PlacementDrives",
+      KeyConditionExpression: "CourseID = :cid",
+      ExpressionAttributeValues: { ":cid": courseId }
+    };
+
+    console.log("[PLACEMENT-DRIVES] Params:", params);
+
+    const data = await dynamo.query(params).promise();
+    console.log("[PLACEMENT-DRIVES] Found:", data.Items.length);
+
+    res.json(data.Items || []);
+  } catch (err) {
+    console.error("[PLACEMENT-DRIVES ERROR]", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+
+
+
+app.get("/api/placement/profile/:studentId", async (req, res) => {
+  try {
+    const studentId = req.params.studentId;
+    console.log("[PLACEMENT-PROFILE] StudentID:", studentId);
+
+    const params = {
+      TableName: "StudentPlacementProfile",
+      Key: { StudentID: studentId }
+    };
+
+    const data = await dynamo.get(params).promise();
+    console.log("[PLACEMENT-PROFILE] Result:", data.Item);
+
+    if (!data.Item) {
+      return res.status(404).json({ error: "Placement profile not found" });
+    }
+
+    res.json(data.Item);
+  } catch (err) {
+    console.error("[PLACEMENT-PROFILE ERROR]", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+
+app.post("/api/placement/apply", async (req, res) => {
+  try {
+    const { studentId, companyId, courseId } = req.body;
+
+    console.log("[PLACEMENT-APPLY] Request:", req.body);
+
+    if (!studentId || !companyId || !courseId) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+
+    const item = {
+      StudentID: studentId,
+      CompanyID: companyId,
+      CourseID: courseId,
+      AppliedOn: new Date().toISOString().split("T")[0],
+      Status: "Applied"
+    };
+
+    await dynamo.put({
+      TableName: "PlacementApplications",
+      Item: item,
+      ConditionExpression:
+        "attribute_not_exists(StudentID) AND attribute_not_exists(CompanyID)"
+    }).promise();
+
+    console.log("[PLACEMENT-APPLY] Saved:", item);
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("[PLACEMENT-APPLY ERROR]", err);
+
+    if (err.code === "ConditionalCheckFailedException") {
+      return res
+        .status(409)
+        .json({ error: "Already applied to this company" });
+    }
+
+    res.status(500).json({ error: "Failed to apply", details: err.message });
+  }
+});
+
+
+
+
+app.get("/api/placement/applications/:studentId", async (req, res) => {
+  try {
+    const { studentId } = req.params;
+    console.log("[PLACEMENT-APPLICATIONS] StudentID:", studentId);
+
+    const params = {
+      TableName: "PlacementApplications",
+      KeyConditionExpression: "StudentID = :sid",
+      ExpressionAttributeValues: {
+        ":sid": studentId
+      }
+    };
+
+    const data = await dynamo.query(params).promise();
+
+    console.log(
+      "[PLACEMENT-APPLICATIONS] Found:",
+      data.Items?.length || 0
+    );
+
+    res.json(data.Items || []);
+  } catch (err) {
+    console.error("[PLACEMENT-APPLICATIONS ERROR]", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+
+// === GET GRIEVANCES FOR STUDENT ===
+app.get("/api/grievances/:studentId", async (req, res) => {
+  const { studentId } = req.params;
+
+  console.log("[GET-GRIEVANCES] StudentID:", studentId);
+
+  const params = {
+    TableName: "Grievances",
+    KeyConditionExpression: "StudentID = :sid",
+    ExpressionAttributeValues: {
+      ":sid": studentId
+    }
+  };
+
+  try {
+    const data = await dynamo.query(params).promise();
+
+    console.log("[GET-GRIEVANCES] Items:", data.Items?.length || 0);
+
+    // Sort newest first
+    const sorted = (data.Items || []).sort(
+      (a, b) => new Date(b.SubmittedAt) - new Date(a.SubmittedAt)
+    );
+
+    res.json(sorted);
+  } catch (err) {
+    console.error("[GET-GRIEVANCES ERROR]", err);
+    res.status(500).json({
+      error: "Failed to fetch grievances",
+      details: err.message
+    });
+  }
+});
+
+
+// === CREATE NEW GRIEVANCE ===
+app.post("/api/grievances", async (req, res) => {
+  const { StudentID, Title, Category, Priority, Description } = req.body;
+
+  console.log("[CREATE-GRIEVANCE] Payload:", req.body);
+
+  if (!StudentID || !Title || !Category || !Priority || !Description) {
+    return res.status(400).json({
+      error: "Missing required fields"
+    });
+  }
+
+  const now = new Date().toISOString().split("T")[0];
+
+  const grievanceItem = {
+    StudentID,
+    GrievanceID: "G" + Date.now(), // unique + sortable
+    Title,
+    Category,
+    Priority,
+    Status: "Under Review",
+    Description,
+    SubmittedAt: now,
+    LastUpdatedAt: now
+  };
+
+  try {
+    await dynamo.put({
+      TableName: "Grievances",
+      Item: grievanceItem
+    }).promise();
+
+    console.log("[CREATE-GRIEVANCE] Saved:", grievanceItem.GrievanceID);
+
+    res.status(201).json({
+      success: true,
+      grievance: grievanceItem
+    });
+  } catch (err) {
+    console.error("[CREATE-GRIEVANCE ERROR]", err);
+    res.status(500).json({
+      error: "Failed to create grievance",
+      details: err.message
+    });
+  }
+});
+
+
+app.get("/api/feedback/faculty/:courseId/:semester", async (req, res) => {
+  const { courseId, semester } = req.params;
+  console.log("[FEEDBACK] Faculty list for", courseId, semester);
+
+  try {
+    // 1. Subjects
+    const subjects = await dynamo.query({
+      TableName: "Subjects",
+      KeyConditionExpression: "CourseID = :cid",
+      ExpressionAttributeValues: { ":cid": courseId }
+    }).promise();
+
+    const semSubjects = subjects.Items.filter(
+      s => Number(s.Semester) === Number(semester)
+    );
+
+    // 2. Faculty assignments
+    const courseSemester = `${courseId}#${semester}`;
+    const assignments = await dynamo.query({
+      TableName: "FacultyAssignments",
+      KeyConditionExpression: "CourseSemester = :cs",
+      ExpressionAttributeValues: { ":cs": courseSemester }
+    }).promise();
+
+    // 3. Merge faculty + subject
+    const result = [];
+    for (const s of semSubjects) {
+      const a = assignments.Items.find(x => x.SubjectCode === s.SubjectCode);
+      if (!a) continue;
+
+      const faculty = await dynamo.get({
+        TableName: "Faculty",
+        Key: {
+          FacultyID: a.FacultyID,
+          Department: s.Branch
+        }
+      }).promise();
+
+      if (faculty.Item) {
+        result.push({
+          FacultyID: faculty.Item.FacultyID,
+          FacultyName: faculty.Item.Name,
+          SubjectCode: s.SubjectCode,
+          SubjectName: s.SubjectName
+        });
+      }
+    }
+
+    res.json(result);
+  } catch (err) {
+    console.error("[FEEDBACK FACULTY ERROR]", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+app.get("/api/feedback/:studentId", async (req, res) => {
+  console.log("[FEEDBACK] Fetching for", req.params.studentId);
+
+  try {
+    const data = await dynamo.query({
+      TableName: "Feedback",
+      KeyConditionExpression: "StudentID = :sid",
+      ExpressionAttributeValues: { ":sid": req.params.studentId }
+    }).promise();
+
+    res.json(data.Items || []);
+  } catch (err) {
+    console.error("[FEEDBACK FETCH ERROR]", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+app.post("/api/feedback", async (req, res) => {
+  console.log("[FEEDBACK SUBMIT]", req.body);
+
+  try {
+    await dynamo.put({
+      TableName: "Feedback",
+      Item: {
+        ...req.body,
+        SubmittedAt: new Date().toISOString().split("T")[0]
+      }
+    }).promise();
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("[FEEDBACK SUBMIT ERROR]", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+
+app.get("/api/resources", async (req, res) => {
+  const {
+    courseId,
+    branch,
+    semester,
+    section,
+    specialization
+  } = req.query;
+
+  console.log("[GET-RESOURCES]", req.query);
+
+  try {
+    const params = {
+      TableName: "Resources",
+      FilterExpression: `
+        CourseID = :cid
+        AND Branch = :branch
+        AND Semester = :sem
+        AND IsActive = :active
+      `,
+      ExpressionAttributeValues: {
+        ":cid": courseId,
+        ":branch": branch,
+        ":sem": Number(semester),
+        ":active": true
+      },
+      ExpressionAttributeNames: {}
+    };
+
+    // SECTION (reserved keyword)
+    if (section) {
+      params.FilterExpression += " AND #sec = :section";
+      params.ExpressionAttributeValues[":section"] = section;
+      params.ExpressionAttributeNames["#sec"] = "Section";
+    }
+
+    // SPECIALIZATION (optional)
+    if (specialization) {
+      params.FilterExpression += " AND Specialization = :spec";
+      params.ExpressionAttributeValues[":spec"] = specialization;
+    }
+
+    const result = await dynamo.scan(params).promise();
+
+    console.log("[GET-RESOURCES] Returned:", result.Items.length);
+
+    res.json(result.Items);
+  } catch (err) {
+    console.error("[GET-RESOURCES ERROR]", err);
+    res.status(500).json({ error: "Failed to fetch resources" });
+  }
+});
+
+
+app.get("/api/faculty/:facultyId/courses", async (req, res) => {
+  try {
+    const params = {
+      TableName: "CourseDetails"
+    };
+
+    const data = await dynamo.scan(params).promise();
+    res.json(data.Items);
+  } catch (err) {
+    console.error("[GET COURSES ERROR]", err);
+    res.status(500).json({ error: "Failed to fetch courses" });
+  }
+});
+
+
+app.get("/api/courses/:courseId/semesters", async (req, res) => {
+  try {
+    const params = {
+      TableName: "CourseDetails",
+      Key: { CourseID: req.params.courseId }
+    };
+
+    const data = await dynamo.get(params).promise();
+
+    if (!data.Item) {
+      return res.json([]);
+    }
+
+    const totalSemesters = data.Item.Duration * 2;
+    const semesters = Array.from({ length: totalSemesters }, (_, i) => i + 1);
+
+    res.json(semesters);
+  } catch (err) {
+    console.error("[GET SEMESTERS ERROR]", err);
+    res.status(500).json({ error: "Failed to fetch semesters" });
+  }
+});
+
+
+app.get("/api/courses/:courseId/sections", async (req, res) => {
+  try {
+    const params = {
+      TableName: "CourseSections",
+      Key: { CourseID: req.params.courseId }
+    };
+
+    const data = await dynamo.get(params).promise();
+    res.json(data.Item?.Sections || []);
+  } catch (err) {
+    console.error("[GET SECTIONS ERROR]", err);
+    res.status(500).json({ error: "Failed to fetch sections" });
+  }
+});
+
+
+app.get("/api/students", async (req, res) => {
+  const { courseId, semester, section } = req.query;
+
+  try {
+    const params = {
+      TableName: "Students",
+      FilterExpression:
+        "CourseID = :c AND Semester = :s AND Section = :sec",
+      ExpressionAttributeValues: {
+        ":c": courseId,
+        ":s": Number(semester),
+        ":sec": section
+      }
+    };
+
+    const data = await dynamo.scan(params).promise();
+    res.json(data.Items || []);
+  } catch (err) {
+    console.error("[GET STUDENTS ERROR]", err);
+    res.status(500).json({ error: "Failed to fetch students" });
+  }
+});
+
+app.post("/api/attendance", async (req, res) => {
+  try {
+    const { records } = req.body;
+
+    const writeRequests = records.map((item) => ({
+      PutRequest: { Item: item }
+    }));
+
+    const params = {
+      RequestItems: {
+        Attendance: writeRequests
+      }
+    };
+
+    await dynamo.batchWrite(params).promise();
+    res.json({ success: true });
+  } catch (err) {
+    console.error("[SAVE ATTENDANCE ERROR]", err);
+    res.status(500).json({ error: "Failed to save attendance" });
+  }
+});
+
+
+app.get("/api/attendance", async (req, res) => {
+  const { courseId, date } = req.query;
+
+  try {
+    const params = {
+      TableName: "Attendance",
+      FilterExpression: "CourseID = :c AND #d = :dt",
+      ExpressionAttributeNames: {
+        "#d": "Date"
+      },
+      ExpressionAttributeValues: {
+        ":c": courseId,
+        ":dt": date
+      }
+    };
+
+    const data = await dynamo.scan(params).promise();
+    res.json(data.Items || []);
+  } catch (err) {
+    console.error("[GET ATTENDANCE ERROR]", err);
+    res.status(500).json({ error: "Failed to fetch attendance" });
+  }
+});
+
+
+
+// Courses
+app.get("/courses", async (req, res) => {
+  const data = await scanTable("CourseDetails");
+  res.json(data);
+});
+
+// Sections
+app.get("/sections/:courseId", async (req, res) => {
+  const item = await getItem("Sections", { CourseID: req.params.courseId });
+  res.json(item);
+});
+
+// Students
+app.get("/students", async (req, res) => {
+  const { courseId, semester, section } = req.query;
+  const data = await scanWithFilters("Students", {
+    CourseID: courseId,
+    Semester: Number(semester),
+    Section: section,
+  });
+  res.json(data);
+});
+
+// Attendance
+app.post("/attendance", async (req, res) => {
+  const records = req.body;
+  for (const r of records) {
+    await putItem("Attendance", r);
+  }
+  res.json({ success: true });
+});
+
+app.get("/api/course-sections", async (req, res) => {
+  try {
+    const { courseId, semester } = req.query;
+
+    if (!courseId || !semester) {
+      return res.status(400).json({ error: "courseId and semester are required" });
+    }
+
+    const params = {
+      TableName: "CourseSections",
+      KeyConditionExpression: "CourseID = :cid AND Semester = :sem",
+      ExpressionAttributeValues: {
+        ":cid": courseId,
+        ":sem": Number(semester),
+      },
+    };
+
+    const data = await dynamo.query(params).promise();
+
+    res.json({
+      sections: data.Items?.[0]?.Sections || [],
+    });
+  } catch (err) {
+    console.error("[GET COURSE SECTIONS ERROR]", err);
+    res.status(500).json({ error: "Failed to fetch sections" });
+  }
+});
+
+
+
+
+
 
 
 
